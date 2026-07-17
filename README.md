@@ -1,2 +1,3 @@
 # imgui-examples
-imgui UI examples rendered with wgpu
+
+imgui UI examples rendered with wgpu.

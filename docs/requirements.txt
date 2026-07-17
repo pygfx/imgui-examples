@@ -1,0 +1,17 @@
+# Documentation build requirements for the imgui-examples gallery.
+# Build with:  pip install -r docs/requirements.txt && (cd docs && make html)
+sphinx
+sphinx-gallery
+matplotlib  # sphinx-gallery imports it during gallery generation
+pydata-sphinx-theme
+
+# Needed to import and run the examples during the build, and for the scraper
+# (pygfx provides the sphinx-gallery image scraper; imageio + pillow write the
+# .webp thumbnails).
+pygfx
+wgpu[imgui]
+rendercanvas
+cmap
+numpy
+imageio
+pillow
