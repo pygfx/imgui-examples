@@ -19,8 +19,8 @@ from rendercanvas.auto import RenderCanvas, loop
 class ImguiColorbar:
     LUT_HEIGHT = 256
     TEX_WIDTH = 2
-    HANDLE_HEIGHT = 6
-    HANDLE_OVERHANG = 2  # how far a handle extends past the bar on each side
+    HANDLE_HEIGHT = 8
+    HANDLE_OVERHANG = 3  # how far a handle extends past the bar on each side
     BAR_BORDER = 1.0  # width of the outline drawn around the bar image
 
     def __init__(
@@ -31,27 +31,41 @@ class ImguiColorbar:
         vmin: float,
         vmax: float,
         cmaps: list[str],
-        width: int = 30,
+        data_range: tuple[float, float] | None = None,
+        width: int = 15,
         height: int = 200,
     ):
         self._device = device
         self._renderer = imgui_renderer
-        self._width = width
-        self._height = height
-        self._data_min = float(vmin)
-        self._data_max = float(vmax)
-        self.vmin = float(vmin)
-        self.vmax = float(vmax)
+        self._width = int(width)
+        self._height = int(height)
+        self._vmin = float(vmin)
+        self._vmax = float(vmax)
+        if data_range is None:
+            data_range = (vmin, vmax)
+        self._data_min, self._data_max = self._validate_range(data_range)
         self.gamma = 1.0
-        self.cmap_name = cmap_name
 
         # When True, dragging the bar between the handles moves both handles
         # together (shifts the vmin/vmax window without changing its width).
-        self.region_drag = True
+        self._region_drag = True
+
+        # Offset (in data units) between the grabbed value and the value under
+        # the cursor, captured when a drag starts so the handle tracks the
+        # cursor without jumping.
+        self._grab_offset = 0.0
 
         self._picker_tex_ids = {
             name: self._make_picker_texture(name) for name in cmaps
         }
+
+        # The active colormap must be one of the colormaps in the picker.
+        if cmap_name not in self._picker_tex_ids:
+            raise ValueError(
+                f"cmap_name {cmap_name!r} is not one of the available "
+                f"colormaps: {list(self._picker_tex_ids)}"
+            )
+        self._cmap_name = cmap_name
 
         self._bar_texture = device.create_texture(
             size=(self.TEX_WIDTH, self.LUT_HEIGHT, 1),
@@ -65,6 +79,86 @@ class ImguiColorbar:
             self._bar_texture.create_view()
         )
         self._update_bar_texture()
+
+    @property
+    def cmap_name(self):
+        return self._cmap_name
+
+    @cmap_name.setter
+    def cmap_name(self, name):
+        if name not in self._picker_tex_ids:
+            raise ValueError(
+                f"cmap_name {name!r} is not one of the available colormaps: "
+                f"{list(self._picker_tex_ids)}"
+            )
+        if name != self._cmap_name:
+            self._cmap_name = name
+            self._update_bar_texture()
+
+    @property
+    def vmin(self):
+        return self._vmin
+
+    @vmin.setter
+    def vmin(self, value):
+        value = float(value)
+        if value != self._vmin:
+            self._vmin = value
+            self._update_bar_texture()
+
+    @property
+    def vmax(self):
+        return self._vmax
+
+    @vmax.setter
+    def vmax(self, value):
+        value = float(value)
+        if value != self._vmax:
+            self._vmax = value
+            self._update_bar_texture()
+
+    @property
+    def width(self):
+        return self._width
+
+    @width.setter
+    def width(self, value):
+        self._width = int(value)
+
+    @property
+    def height(self):
+        return self._height
+
+    @height.setter
+    def height(self, value):
+        self._height = int(value)
+
+    @property
+    def region_drag(self):
+        return self._region_drag
+
+    @region_drag.setter
+    def region_drag(self, value):
+        self._region_drag = bool(value)
+
+    @property
+    def data_range(self):
+        return (self._data_min, self._data_max)
+
+    @data_range.setter
+    def data_range(self, value):
+        self._data_min, self._data_max = self._validate_range(value)
+        self._update_bar_texture()
+
+    @staticmethod
+    def _validate_range(data_range):
+        data_min, data_max = float(data_range[0]), float(data_range[1])
+        if data_max <= data_min:
+            raise ValueError(
+                f"data_range max ({data_max}) must be greater than "
+                f"min ({data_min})"
+            )
+        return data_min, data_max
 
     def _make_picker_texture(self, name):
         lut = (Colormap(name)(np.linspace(0, 1, 256)) * 255).astype(np.uint8)
@@ -130,6 +224,10 @@ class ImguiColorbar:
         span = self._data_max - self._data_min
         return y0 + (1.0 - (v - self._data_min) / span) * bar_h
 
+    def _y_to_value(self, y, y0, bar_h):
+        span = self._data_max - self._data_min
+        return self._data_min + (1.0 - (y - y0) / bar_h) * span
+
     def _draw_handles(self, bar_x, bar_y, bar_w, bar_h):
         draw_list = imgui.get_window_draw_list()
         fill = imgui.color_convert_float4_to_u32((1.0, 1.0, 1.0, 1.0))
@@ -142,28 +240,34 @@ class ImguiColorbar:
         span = self._data_max - self._data_min
         min_sep = (h / bar_h) * span
 
-        y_max = self._value_to_y(self.vmax, bar_y, bar_h)
-        y_min = self._value_to_y(self.vmin, bar_y, bar_h)
+        def cursor_value():
+            # The data value under the cursor. Handles track this absolute
+            # position (plus the grab offset) rather than accumulating per-frame
+            # deltas, so a fast drag past the top/bottom edge pins the handle to
+            # the extreme instead of stalling partway.
+            return self._y_to_value(imgui.get_io().mouse_pos.y, bar_y, bar_h)
 
         # Drag the region between the handles to move both handles together.
         if self.region_drag:
-            top = y_max + h / 2
-            bottom = y_min - h / 2
+            top = self._value_to_y(self.vmax, bar_y, bar_h) + h / 2
+            bottom = self._value_to_y(self.vmin, bar_y, bar_h) - h / 2
             if bottom > top:
                 imgui.set_cursor_screen_pos((x0, top))
                 imgui.invisible_button("##colorbar_region", (x1 - x0, bottom - top))
+                if imgui.is_item_activated():
+                    self._grab_offset = 0.5 * (self.vmin + self.vmax) - cursor_value()
                 if imgui.is_item_active():
-                    dy = imgui.get_io().mouse_delta.y
-                    dv = -(dy / bar_h) * span
-                    # Clamp the shift so neither handle leaves the data range.
-                    dv = max(self._data_min - self.vmin,
-                             min(self._data_max - self.vmax, dv))
-                    if dv != 0.0:
-                        self.vmin += dv
-                        self.vmax += dv
+                    half = 0.5 * (self.vmax - self.vmin)
+                    center = cursor_value() + self._grab_offset
+                    center = max(self._data_min + half,
+                                 min(self._data_max - half, center))
+                    vmin, vmax = center - half, center + half
+                    if (vmin, vmax) != (self._vmin, self._vmax):
+                        self._vmin, self._vmax = vmin, vmax
                         self._update_bar_texture()
 
-        for y in (y_max, y_min):
+        for v in (self.vmax, self.vmin):
+            y = self._value_to_y(v, bar_y, bar_h)
             draw_list.add_rect_filled((x0, y - h / 2), (x1, y + h / 2), fill)
             draw_list.add_rect(
                 (x0, y - h / 2), (x1, y + h / 2), outline, thickness=1.0
@@ -179,12 +283,13 @@ class ImguiColorbar:
             y = self._value_to_y(cur, bar_y, bar_h)
             imgui.set_cursor_screen_pos((x0, y - h / 2))
             imgui.invisible_button(label, (x1 - x0, h))
+            if imgui.is_item_activated():
+                self._grab_offset = cur - cursor_value()
             if imgui.is_item_active():
-                dy = imgui.get_io().mouse_delta.y
-                new_v = max(lo_fn(), min(hi_fn(), cur - (dy / bar_h) * span))
-                if new_v != cur:
-                    setattr(self, attr, new_v)
-                    self._update_bar_texture()
+                setattr(
+                    self, attr,
+                    max(lo_fn(), min(hi_fn(), cursor_value() + self._grab_offset)),
+                )
 
     def _draw_popup(self):
         _, self.gamma = imgui.slider_float("gamma", self.gamma, 0.1, 5.0)
@@ -202,7 +307,6 @@ class ImguiColorbar:
             imgui.pop_style_color()
             if selected:
                 self.cmap_name = name
-                self._update_bar_texture()
 
 
 canvas = RenderCanvas(size=(256, 400), max_fps=60, update_mode="continuous")
