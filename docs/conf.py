@@ -16,8 +16,8 @@ EXAMPLES_DIR = ROOT_DIR / "examples"
 # -- Project information -----------------------------------------------------
 
 project = "imgui-examples"
-copyright = "2026, imgui-examples contributors"
-author = "imgui-examples contributors"
+copyright = "2026, Kushal Kolar, Almar Klein, Caitlin Lewis"
+author = "Kushal Kolar, Almar Klein, Caitlin Lewis"
 
 # -- General configuration ---------------------------------------------------
 
