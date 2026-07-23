@@ -292,21 +292,31 @@ class ImguiColorbar:
                 )
 
     def _draw_popup(self):
+        imgui.set_next_item_width(150)
         _, self.gamma = imgui.slider_float("gamma", self.gamma, 0.1, 5.0)
         imgui.separator()
         texture_height = imgui.get_font_size() - 2
         for name, tex_id in self._picker_tex_ids.items():
-            _clicked, selected = imgui.menu_item(
-                name, "", p_selected=(self.cmap_name == name)
-            )
+            # menu_item's own checkmark is drawn at the far right of the row, so
+            # pass p_selected=False and draw our own checkmark next to the image.
+            if imgui.menu_item(name, "", False)[0]:
+                self.cmap_name = name
             imgui.same_line()
             imgui.push_style_color(imgui.Col_.border, (1.0, 1.0, 1.0, 1.0))
             imgui.push_style_var(imgui.StyleVar_.image_border_size, 1.0)
             imgui.image(tex_id, image_size=(100, texture_height))
             imgui.pop_style_var()
             imgui.pop_style_color()
-            if selected:
-                self.cmap_name = name
+            if self.cmap_name == name:
+                imgui.same_line(0.0, 4.0)
+                pos = imgui.get_cursor_screen_pos()
+                imgui.internal.render_check_mark(
+                    imgui.get_window_draw_list(),
+                    (pos.x, pos.y),
+                    imgui.get_color_u32(imgui.Col_.text),
+                    texture_height,
+                )
+                imgui.dummy((texture_height, texture_height))
 
 
 canvas = RenderCanvas(size=(256, 400), max_fps=60, update_mode="continuous")
